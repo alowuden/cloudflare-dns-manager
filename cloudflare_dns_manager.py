@@ -1,6 +1,12 @@
-import requests
+import os
 import sys
+import json
+import requests
 from typing import List, Dict, Optional
+
+# 配置文件默认保存在脚本同级目录下
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cf_config.json")
+
 
 class CloudflareDNSManager:
     def __init__(self, api_token: str):
@@ -31,7 +37,7 @@ class CloudflareDNSManager:
         """查询指定 Zone 下的所有 IP 解析记录（默认包含 IPv4 A 记录和 IPv6 AAAA 记录）"""
         records = []
         url = f"{self.base_url}/zones/{zone_id}/dns_records"
-        
+
         for r_type in record_types:
             page = 1
             while True:
@@ -47,10 +53,10 @@ class CloudflareDNSManager:
                     if not data.get("success"):
                         print(f"[!] 查询记录失败: {data.get('errors')}")
                         break
-                    
+
                     batch = data.get("result", [])
                     records.extend(batch)
-                    
+
                     # 检查是否还有下一页
                     result_info = data.get("result_info", {})
                     total_pages = result_info.get("total_pages", 1)
@@ -82,6 +88,25 @@ class CloudflareDNSManager:
             return False
 
 
+def load_config() -> dict:
+    """读取本地保存的配置文件"""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_config(config: dict):
+    """保存配置到本地，并在 Linux/macOS 下设置 600 权限保障安全"""
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=4, ensure_ascii=False)
+    if os.name == "posix":
+        os.chmod(CONFIG_FILE, 0o600)
+
+
 def print_records_table(all_records: List[Dict]):
     """格式化打印解析记录表"""
     if not all_records:
@@ -98,21 +123,41 @@ def print_records_table(all_records: List[Dict]):
 
 
 def main():
-    # 1. 配置你的 Cloudflare API Token
-    CF_API_TOKEN = "在这里填入你的_CLOUDFLARE_API_TOKEN"
-    
-    # 2. 预设常用的二级域名列表（也可在运行时手动输入）
-    DEFAULT_DOMAINS = ["example1.com", "example2.com"]
+    config = load_config()
 
-    if CF_API_TOKEN == "在这里填入你的_CLOUDFLARE_API_TOKEN":
-        CF_API_TOKEN = input("请输入你的 Cloudflare API Token: ").strip()
+    # 1. 自动读取或首次询问 API Token
+    api_token = config.get("api_token", "")
+    if not api_token:
+        api_token = input("首次运行，请输入你的 Cloudflare API Token: ").strip()
+        if not api_token:
+            print("[!] Token 不能为空，退出。")
+            sys.exit(1)
+        config["api_token"] = api_token
+        save_config(config)
+        print(f"[+] Token 已自动保存至 {CONFIG_FILE}，下次运行无需再输！\n")
 
-    cf = CloudflareDNSManager(CF_API_TOKEN)
+    cf = CloudflareDNSManager(api_token)
 
-    user_input = input(f"请输入二级域名（多个用逗号分隔，直接回车默认查询 {DEFAULT_DOMAINS}）: ").strip()
-    domains = [d.strip() for d in user_input.split(",") if d.strip()] if user_input else DEFAULT_DOMAINS
+    # 2. 自动读取或更新常用二级域名列表
+    saved_domains = config.get("domains", [])
+    if saved_domains:
+        prompt = f"请输入二级域名（多个用逗号分隔，直接回车默认查询上次的 {saved_domains}）: "
+    else:
+        prompt = "请输入要查询的二级域名（多个用逗号分隔，如 a.com, b.com）: "
 
-    # 汇总所有查询到的记录，方便后续通过序号或 IP 修改
+    user_input = input(prompt).strip()
+    if user_input:
+        domains = [d.strip() for d in user_input.split(",") if d.strip()]
+        config["domains"] = domains
+        save_config(config)
+    else:
+        domains = saved_domains
+
+    if not domains:
+        print("[!] 未提供任何二级域名，退出。")
+        sys.exit(1)
+
+    # 汇总所有查询到的记录
     flat_records = []
 
     print("\n[*] 正在拉取 Cloudflare DNS 解析数据...")
@@ -144,11 +189,20 @@ def main():
         print("  [1] 按序号修改单条三级域名的 IP")
         print("  [2] 按子域名名称修改 IP (如输入 sub.example1.com)")
         print("  [3] 批量替换 IP (将所有指向【旧 IP】的三级域名一键改为【新 IP】)")
+        print("  [4] 重新设置 API Token")
         print("  [q] 退出脚本")
-        choice = input("请输入选项 [1/2/3/q]: ").strip().lower()
+        choice = input("请输入选项 [1/2/3/4/q]: ").strip().lower()
 
         if choice == 'q':
             break
+
+        elif choice == '4':
+            new_token = input("请输入新的 Cloudflare API Token: ").strip()
+            if new_token:
+                config["api_token"] = new_token
+                save_config(config)
+                print("[+] 新 Token 已保存，请重新运行脚本生效。")
+                break
 
         elif choice == '1':
             idx_str = input("请输入要修改的记录【序号】: ").strip()
@@ -199,6 +253,7 @@ def main():
                         m["content"] = new_ip
 
         print_records_table(flat_records)
+
 
 if __name__ == "__main__":
     main()
